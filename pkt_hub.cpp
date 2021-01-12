@@ -30,29 +30,29 @@ void print_trace(int nSig)
 
 #define MAX_STREAMS 10
 AVFormatContext *producer_context;
-bool producer_connected = false;
 uint64_t dts_offsets[MAX_STREAMS] = { 0 };
 uint64_t last_dtss[MAX_STREAMS] = { 0 };
 
 AVPacket *pkt;
 pthread_mutex_t pkts_mutex;
+pthread_mutex_t producer_connected;
 
-void lock_mutex() {
-  pthread_mutex_lock(&pkts_mutex);
+void lock_mutex(pthread_mutex_t *mutex) {
+  pthread_mutex_lock(mutex);
 }
 
-void unlock_mutex() {
-  pthread_mutex_unlock(&pkts_mutex);
+void unlock_mutex(pthread_mutex_t *mutex) {
+  pthread_mutex_unlock(mutex);
 }
 
 void *producer_handler(void *ptr) {
   AVPacket *ppkt;
   AVInputFormat *format = av_find_input_format("nut");
   int port = *(int *)ptr;
+  char url[1024];
+  sprintf(url, "tcp://0.0.0.0:%d?listen", port);
 
   while (1) {
-    char url[1024];
-    sprintf(url, "tcp://0.0.0.0:%d?listen", port);
     std::cerr << "waiting for producer on " << url << std::endl;
     int ret;
     producer_context = avformat_alloc_context();
@@ -73,38 +73,40 @@ void *producer_handler(void *ptr) {
 
     av_dump_format(producer_context, 0, url, 0);
 
-    producer_connected = true;
+    unlock_mutex(&producer_connected);
 
     while (1) {
       ppkt = av_packet_alloc();
       av_init_packet(ppkt);
       ret = av_read_frame(producer_context, ppkt);
-      if (ret < 0) {
+      if (ret == AVERROR_EOF) {
+        lock_mutex(&pkts_mutex);
         pkt = NULL;
+        unlock_mutex(&pkts_mutex);
         std::cerr << "failed to read frame " << ret << std::endl;
-        break;
+        goto producer_exit;
       }
       ppkt->dts += dts_offsets[ppkt->stream_index];
       ppkt->pts = ppkt->dts;
-      last_dtss[ppkt->stream_index] = ppkt->dts;
-      lock_mutex();
+      last_dtss[ppkt->stream_index] = ppkt->dts + 1;
+      lock_mutex(&pkts_mutex);
       av_packet_free(&pkt);
       pkt = av_packet_clone(ppkt);
+      unlock_mutex(&pkts_mutex);
       av_packet_free(&ppkt);
-      unlock_mutex();
     }
 producer_exit:
     memcpy(dts_offsets, last_dtss, MAX_STREAMS*sizeof(uint64_t));
-    producer_connected = false;
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
     producer_context = NULL;
     std::cerr << "producer dropped\n";
+    lock_mutex(&producer_connected);
   }
   return 0;
 }
 
-void *consumer_handler(void *ptr) {
+static void *consumer_handler(void *ptr) {
   AVFormatContext *consumer_context;
   AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   int port = *(int *)ptr;
@@ -119,7 +121,8 @@ void *consumer_handler(void *ptr) {
     return 0;
   }
 
-  while (!producer_connected || !producer_context);
+  lock_mutex(&producer_connected);
+  unlock_mutex(&producer_connected);
 
   for (int i = 0; i < producer_context->nb_streams; i++) {
     AVStream *out_stream;
@@ -167,22 +170,23 @@ void *consumer_handler(void *ptr) {
       goto consumer_fail;
     }
   }
+
   while (1) {
-    lock_mutex();
+    lock_mutex(&pkts_mutex);
     if (!pkt) { 
-      unlock_mutex();
+      unlock_mutex(&pkts_mutex);
       continue;
     }
     if (pkt->dts == last_dts) {
-      unlock_mutex();
+      unlock_mutex(&pkts_mutex);
       continue;
     }
     ret = av_write_frame(consumer_context, pkt);
     last_dts = pkt->dts;
-    unlock_mutex();
+    unlock_mutex(&pkts_mutex);
     if (ret < 0) {
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-      if (ret != -22)
+      if (ret == -104)
         goto consumer_fail;
     }
   }
@@ -207,10 +211,13 @@ int main(int argc, char **argv) {
   signal(SIGSEGV, print_trace);
   
   pthread_mutex_init(&pkts_mutex, NULL);
+  pthread_mutex_init(&producer_connected, NULL);
+  lock_mutex(&producer_connected);
   pthread_create(&producer_thread, NULL, producer_handler, &producer_port);
   pthread_create(&consumer_thread, NULL, consumer_handler, &consumers_port);
   pthread_join(producer_thread, NULL);
   pthread_join(consumer_thread, NULL);
   pthread_mutex_destroy(&pkts_mutex);
+  pthread_mutex_destroy(&producer_connected);
   return 0;
 }
