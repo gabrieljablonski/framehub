@@ -88,6 +88,7 @@ void *producer_handler(void *ptr) {
       ppkt->pts = ppkt->dts;
       last_dtss[ppkt->stream_index] = ppkt->dts;
       lock_mutex();
+      av_packet_free(&pkt);
       pkt = av_packet_clone(ppkt);
       unlock_mutex();
     }
