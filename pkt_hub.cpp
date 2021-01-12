@@ -52,7 +52,7 @@ void *producer_handler(void *ptr) {
 
   while (1) {
     char url[1024];
-    sprintf(url, "tcp://localhost:%d?listen", port);
+    sprintf(url, "tcp://0.0.0.0:%d?listen", port);
     std::cerr << "waiting for producer on " << url << std::endl;
     int ret;
     producer_context = avformat_alloc_context();
@@ -107,7 +107,7 @@ void *consumer_handler(void *ptr) {
   AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   int port = *(int *)ptr;
   char url[1024];
-  sprintf(url, "tcp://localhost:%d?listen", port);
+  sprintf(url, "tcp://0.0.0.0:%d?listen", port);
   int64_t last_dts = 0;
 
   std::cerr << "setting up output to " << url << std::endl;
