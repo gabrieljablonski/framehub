@@ -75,9 +75,9 @@ void *producer_handler(void *ptr) {
 
     producer_connected = true;
 
-    ppkt = av_packet_alloc();
-    av_init_packet(ppkt);
     while (1) {
+      ppkt = av_packet_alloc();
+      av_init_packet(ppkt);
       ret = av_read_frame(producer_context, ppkt);
       if (ret < 0) {
         pkt = NULL;
@@ -90,12 +90,12 @@ void *producer_handler(void *ptr) {
       lock_mutex();
       av_packet_free(&pkt);
       pkt = av_packet_clone(ppkt);
+      av_packet_free(&ppkt);
       unlock_mutex();
     }
 producer_exit:
     memcpy(dts_offsets, last_dtss, MAX_STREAMS*sizeof(uint64_t));
     producer_connected = false;
-    av_packet_free(&ppkt);
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
     producer_context = NULL;
