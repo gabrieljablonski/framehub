@@ -2,6 +2,7 @@
 #include <execinfo.h>
 #include <signal.h>
 #include <inttypes.h>
+#include <unistd.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -97,11 +98,11 @@ void *producer_handler(void *ptr) {
     }
 producer_exit:
     memcpy(dts_offsets, last_dtss, MAX_STREAMS*sizeof(uint64_t));
+    lock_mutex(&producer_connected);
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
     producer_context = NULL;
     std::cerr << "producer dropped\n";
-    lock_mutex(&producer_connected);
   }
   return 0;
 }
@@ -112,7 +113,7 @@ static void *consumer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   sprintf(url, "tcp://0.0.0.0:%d?listen", port);
-  int64_t last_dts = 0;
+  AVPacket *last_pkt;
 
   std::cerr << "setting up output to " << url << std::endl;
   int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url);
@@ -122,8 +123,6 @@ static void *consumer_handler(void *ptr) {
   }
 
   lock_mutex(&producer_connected);
-  unlock_mutex(&producer_connected);
-
   for (int i = 0; i < producer_context->nb_streams; i++) {
     AVStream *out_stream;
     AVStream *in_stream = producer_context->streams[i];
@@ -147,7 +146,12 @@ static void *consumer_handler(void *ptr) {
       std::cerr << "Failed to copy codec parameters\n";
       goto consumer_fail;
     }
+
+    out_stream->avg_frame_rate = in_stream->avg_frame_rate;
+    out_stream->r_frame_rate = in_stream->r_frame_rate;
+    out_stream->time_base = in_stream->time_base;
   }
+  unlock_mutex(&producer_connected);
   
   av_dump_format(consumer_context, 0, url, 1);
 
@@ -177,16 +181,16 @@ static void *consumer_handler(void *ptr) {
       unlock_mutex(&pkts_mutex);
       continue;
     }
-    if (pkt->dts == last_dts) {
+    if (pkt == last_pkt) {
       unlock_mutex(&pkts_mutex);
       continue;
     }
     ret = av_write_frame(consumer_context, pkt);
-    last_dts = pkt->dts;
+    last_pkt = pkt;
     unlock_mutex(&pkts_mutex);
     if (ret < 0) {
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-      if (ret == -104)
+      if (ret == -104 || ret == -32)
         goto consumer_fail;
     }
   }
