@@ -177,12 +177,13 @@ static void *consumer_handler(void *ptr) {
 
   while (1) {
     lock_mutex(&pkts_mutex);
-    if (!pkt) { 
+    if (!pkt) {
       unlock_mutex(&pkts_mutex);
       continue;
     }
     if (pkt == last_pkt) {
       unlock_mutex(&pkts_mutex);
+      usleep(16667);
       continue;
     }
     ret = av_write_frame(consumer_context, pkt);
