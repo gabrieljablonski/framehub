@@ -111,85 +111,82 @@ void *consumer_handler(void *ptr) {
   int64_t last_dts = 0;
 
   std::cerr << "setting up output to " << url << std::endl;
-  while (1) {
-    int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url);
-    if (ret < 0) {
-      std::cerr << "`avformat_alloc_output_context2()` failed " << ret << std::endl;
+  int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url);
+  if (ret < 0) {
+    std::cerr << "`avformat_alloc_output_context2()` failed " << ret << std::endl;
+    return 0;
+  }
+
+  while (!producer_connected);
+
+  for (int i = 0; i < producer_context->nb_streams; i++) {
+    AVStream *out_stream;
+    AVStream *in_stream = producer_context->streams[i];
+    AVCodecParameters *in_codecpar = in_stream->codecpar;
+
+    if (in_codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
+      in_codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
+      in_codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
       continue;
     }
 
-    while (!producer_connected);
-
-    for (int i = 0; i < producer_context->nb_streams; i++) {
-      AVStream *out_stream;
-      AVStream *in_stream = producer_context->streams[i];
-      AVCodecParameters *in_codecpar = in_stream->codecpar;
-
-      if (in_codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
-        in_codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
-        in_codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
-        continue;
-      }
-
-      out_stream = avformat_new_stream(consumer_context, NULL);
-      if (!out_stream) {
-        std::cerr << "Failed allocating output stream\n";
-        ret = AVERROR_UNKNOWN;
-        goto consumer_fail;
-      }
-
-      ret = avcodec_parameters_copy(out_stream->codecpar, in_codecpar);
-      if (ret < 0) {
-        std::cerr << "Failed to copy codec parameters\n";
-        goto consumer_fail;
-      }
-    }
-    
-    av_dump_format(consumer_context, 0, url, 1);
-
-    if (!(consumer_context->oformat->flags & AVFMT_NOFILE)) {
-      avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
-    }
-    pthread_t next_consumer;
-    pthread_create(&next_consumer, NULL, consumer_handler, ptr);
-
-    ret = avformat_init_output(consumer_context, NULL);
-    if (ret < 0) {
-      std::cerr << "`avformat_init_output()` failed " << ret << std::endl;
+    out_stream = avformat_new_stream(consumer_context, NULL);
+    if (!out_stream) {
+      std::cerr << "Failed allocating output stream\n";
+      ret = AVERROR_UNKNOWN;
       goto consumer_fail;
     }
 
-    if (ret == AVSTREAM_INIT_IN_WRITE_HEADER) {
-      ret = avformat_write_header(consumer_context, NULL);
-      if (ret < 0) {
-        std::cerr << "`avformat_write_header()` failed " << ret << std::endl;
-        goto consumer_fail;
-      }
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_codecpar);
+    if (ret < 0) {
+      std::cerr << "Failed to copy codec parameters\n";
+      goto consumer_fail;
     }
-    while (1) {
-      lock_mutex();
-      if (!pkt) { 
-        unlock_mutex();
-        continue;
-      }
-      if (pkt->dts == last_dts) {
-        unlock_mutex();
-        continue;
-      }
-      ret = av_write_frame(consumer_context, pkt);
-      last_dts = pkt->dts;
-      unlock_mutex();
-      if (ret < 0) {
-        std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-        if (ret != -22)
-          goto consumer_fail;
-      }
-    }
-consumer_fail:
-    av_write_trailer(consumer_context);
-    avformat_free_context(consumer_context);
-    std::cerr << "consumer dropped\n";
   }
+  
+  av_dump_format(consumer_context, 0, url, 1);
+
+  if (!(consumer_context->oformat->flags & AVFMT_NOFILE)) {
+    avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
+  }
+  pthread_t next_consumer;
+  pthread_create(&next_consumer, NULL, consumer_handler, ptr);
+
+  ret = avformat_init_output(consumer_context, NULL);
+  if (ret < 0) {
+    std::cerr << "`avformat_init_output()` failed " << ret << std::endl;
+    goto consumer_fail;
+  }
+
+  if (ret == AVSTREAM_INIT_IN_WRITE_HEADER) {
+    ret = avformat_write_header(consumer_context, NULL);
+    if (ret < 0) {
+      std::cerr << "`avformat_write_header()` failed " << ret << std::endl;
+      goto consumer_fail;
+    }
+  }
+  while (1) {
+    lock_mutex();
+    if (!pkt) { 
+      unlock_mutex();
+      continue;
+    }
+    if (pkt->dts == last_dts) {
+      unlock_mutex();
+      continue;
+    }
+    ret = av_write_frame(consumer_context, pkt);
+    last_dts = pkt->dts;
+    unlock_mutex();
+    if (ret < 0) {
+      std::cerr << "`av_write_frame()` failed " << ret << std::endl;
+      if (ret != -22)
+        goto consumer_fail;
+    }
+  }
+consumer_fail:
+  avformat_free_context(consumer_context);
+  std::cerr << "consumer dropped\n";
   return 0;
 }
 
