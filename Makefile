@@ -1,13 +1,13 @@
 CC=g++
-CFLAGS=-I./include
-LIBS=-pthread
+CFLAGS=-I.
+LIBS=-pthread -lavformat -lavutil -lavcodec -lfmt
 DEPS=
-OBJS=hub.o
+OBJS=pkt_hub.o
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS) $(LIBS)
 
-hub: $(OBJS)
+pkt_hub: $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 .PHONY: clean
