@@ -1,6 +1,6 @@
 CC=g++
 CFLAGS=-I.
-LIBS=-pthread -lavformat -lavutil -lavcodec -lfmt
+LIBS=-pthread -lavformat -lavutil -lavcodec
 DEPS=
 OBJS=pkt_hub.o
 

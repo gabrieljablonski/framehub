@@ -1,5 +1,4 @@
 #include <iostream>
-#include <fmt/core.h>
 #include <execinfo.h>
 #include <signal.h>
 #include <inttypes.h>
@@ -52,11 +51,12 @@ void *producer_handler(void *ptr) {
   int port = *(int *)ptr;
 
   while (1) {
-    std::string url(fmt::format("tcp://localhost:{}?listen", port));
+    char url[1024];
+    sprintf(url, "tcp://localhost:%d?listen", port);
     std::cerr << "waiting for producer on " << url << std::endl;
     int ret;
     producer_context = avformat_alloc_context();
-    ret = avformat_open_input(&producer_context, url.c_str(), format, NULL);
+    ret = avformat_open_input(&producer_context, url, format, NULL);
 
     std::cerr << "producer connected\n";
 
@@ -71,7 +71,7 @@ void *producer_handler(void *ptr) {
       goto producer_exit;
     }
 
-    av_dump_format(producer_context, 0, url.c_str(), 0);
+    av_dump_format(producer_context, 0, url, 0);
 
     producer_connected = true;
 
@@ -106,12 +106,13 @@ void *consumer_handler(void *ptr) {
   AVFormatContext *consumer_context;
   AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   int port = *(int *)ptr;
-  std::string url(fmt::format("tcp://localhost:{}?listen", port));
+  char url[1024];
+  sprintf(url, "tcp://localhost:%d?listen", port);
   int64_t last_dts = 0;
 
   std::cerr << "setting up output to " << url << std::endl;
   while (1) {
-    int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url.c_str());
+    int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url);
     if (ret < 0) {
       std::cerr << "`avformat_alloc_output_context2()` failed " << ret << std::endl;
       continue;
@@ -144,10 +145,10 @@ void *consumer_handler(void *ptr) {
       }
     }
     
-    av_dump_format(consumer_context, 0, url.c_str(), 1);
+    av_dump_format(consumer_context, 0, url, 1);
 
     if (!(consumer_context->oformat->flags & AVFMT_NOFILE)) {
-      avio_open(&consumer_context->pb, url.c_str(), AVIO_FLAG_WRITE);
+      avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
     }
     pthread_t next_consumer;
     pthread_create(&next_consumer, NULL, consumer_handler, ptr);
