@@ -97,6 +97,7 @@ producer_exit:
     av_packet_free(&ppkt);
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
+    producer_context = NULL;
     std::cerr << "producer dropped\n";
   }
   return 0;
@@ -117,7 +118,7 @@ void *consumer_handler(void *ptr) {
     return 0;
   }
 
-  while (!producer_connected);
+  while (!producer_connected || !producer_context);
 
   for (int i = 0; i < producer_context->nb_streams; i++) {
     AVStream *out_stream;
