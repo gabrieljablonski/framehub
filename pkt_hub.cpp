@@ -188,6 +188,7 @@ static void *consumer_handler(void *ptr) {
   }
 
   while (1) {
+    AVPacket *cpkt;
     lock_mutex(&pkts_mutex);
     if (!pkt) {
       unlock_mutex(&pkts_mutex);
@@ -198,9 +199,10 @@ static void *consumer_handler(void *ptr) {
       usleep(1000);
       continue;
     }
-    ret = av_write_frame(consumer_context, pkt);
+    cpkt = av_packet_clone(pkt);
     last_pkt = pkt;
     unlock_mutex(&pkts_mutex);
+    ret = av_write_frame(consumer_context, cpkt);
     if (ret < 0) {
       ++error_count;
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
@@ -208,6 +210,7 @@ static void *consumer_handler(void *ptr) {
         goto consumer_fail;
       continue;
     }
+    av_packet_free(&cpkt);
     error_count = 0;
   }
 consumer_fail:
