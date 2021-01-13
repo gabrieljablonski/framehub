@@ -29,6 +29,7 @@ void print_trace(int nSig)
   exit(-1);
 }
 
+#define MAX_ERRORS 10
 #define MAX_STREAMS 10
 AVFormatContext *producer_context;
 uint64_t dts_offsets[MAX_STREAMS] = { 0 };
@@ -51,6 +52,8 @@ void *producer_handler(void *ptr) {
   AVInputFormat *format = av_find_input_format("nut");
   int port = *(int *)ptr;
   char url[1024];
+  int error_count = 0;
+
   sprintf(url, "tcp://0.0.0.0:%d?listen", port);
 
   while (1) {
@@ -75,7 +78,6 @@ void *producer_handler(void *ptr) {
     av_dump_format(producer_context, 0, url, 0);
 
     unlock_mutex(&producer_connected);
-
     while (1) {
       ppkt = av_packet_alloc();
       av_init_packet(ppkt);
@@ -84,9 +86,17 @@ void *producer_handler(void *ptr) {
         lock_mutex(&pkts_mutex);
         pkt = NULL;
         unlock_mutex(&pkts_mutex);
-        std::cerr << "failed to read frame " << ret << std::endl;
+        std::cerr << "producer EOF " << ret << std::endl;
         goto producer_exit;
       }
+      if (ret < 0) {
+        ++error_count;
+        std::cerr << "failed to read frame " << ret << std::endl;
+        if (error_count > MAX_ERRORS)
+          goto producer_exit;
+        continue;
+      }
+      error_count = 0;
       ppkt->dts += dts_offsets[ppkt->stream_index];
       ppkt->pts = ppkt->dts;
       last_dtss[ppkt->stream_index] = ppkt->dts + 1;
@@ -112,8 +122,10 @@ static void *consumer_handler(void *ptr) {
   AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   int port = *(int *)ptr;
   char url[1024];
+  int error_count = 0;
+  AVPacket *last_pkt = NULL;
+
   sprintf(url, "tcp://0.0.0.0:%d?listen", port);
-  AVPacket *last_pkt;
 
   std::cerr << "setting up output to " << url << std::endl;
   int ret = avformat_alloc_output_context2(&consumer_context, format, NULL, url);
@@ -183,17 +195,20 @@ static void *consumer_handler(void *ptr) {
     }
     if (pkt == last_pkt) {
       unlock_mutex(&pkts_mutex);
-      usleep(16667);
+      usleep(1000);
       continue;
     }
     ret = av_write_frame(consumer_context, pkt);
     last_pkt = pkt;
     unlock_mutex(&pkts_mutex);
     if (ret < 0) {
+      ++error_count;
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-      if (ret == -104 || ret == -32)
+      if (ret == -104 || ret == -32 || error_count > MAX_ERRORS)
         goto consumer_fail;
+      continue;
     }
+    error_count = 0;
   }
 consumer_fail:
   avformat_free_context(consumer_context);
