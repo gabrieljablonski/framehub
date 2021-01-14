@@ -2,12 +2,12 @@ CC=g++
 CFLAGS=-I.
 LIBS=-pthread -lavformat -lavutil -lavcodec
 DEPS=
-OBJS=pkt_hub.o
+OBJS=frame_hub.o
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS) $(LIBS)
 
-pkt_hub: $(OBJS)
+frame_hub: $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 .PHONY: clean
