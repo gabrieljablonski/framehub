@@ -485,12 +485,12 @@ static void *consumer_handler(void *ptr) {
     }
     error_count = 0;
 write_frame_end:
-    avcodec_flush_buffers(video_codec_context);
-    avcodec_flush_buffers(audio_codec_context);
     av_packet_unref(&cpkt);
     free_frame(&cframe);
   }
 consumer_fail:
+  avcodec_flush_buffers(video_codec_context);
+  avcodec_flush_buffers(audio_codec_context);
   avformat_free_context(consumer_context);
   std::cerr << "consumer dropped\n";
   return 0;
