@@ -15,17 +15,17 @@ Frame::Frame() {};
 Frame::Frame(const Frame &f) {
   frame_ = f.frame_;
   dts_ = f.dts_;
-  consumers_waiting_ = f.consumers_waiting_;
   stream_ = f.stream_;
   number_ = f.number_;
+  cloned_count_ = f.cloned_count_;
 };
 
-Frame::Frame(AVFrame *frame, int64_t dts, uint8_t consumers_waiting, int stream, uint64_t number) {
+Frame::Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number) {
   frame_ = frame;
   dts_ = dts;
-  consumers_waiting_ = consumers_waiting;
   stream_ = stream;
   number_ = number;
+  cloned_count_ = 0;
 }
 
 AVFrame* Frame::GetFrame() {
@@ -36,8 +36,8 @@ int64_t Frame::GetDts() {
   return dts_;
 }
 
-uint8_t Frame::GetConsumersWaiting() {
-  return consumers_waiting_;
+uint8_t Frame::GetClonedCount() {
+  return cloned_count_;
 }
 
 int Frame::GetStream() {
@@ -50,29 +50,14 @@ uint64_t Frame::GetNumber() {
 
 Frame* Frame::Clone() {
   std::lock_guard<std::mutex> lk(mutex_);
-  Frame *clone = new Frame(av_frame_clone(frame_), dts_, consumers_waiting_, stream_, number_);
-  Release();
+  Frame *clone = new Frame(av_frame_clone(frame_), dts_, stream_, number_);
+  ++cloned_count_;
   return clone;
 }
 
-void Frame::Free(bool force) {
+void Frame::Free() {
   if (!frame_) return;
-  if (!consumers_waiting_ || force)
     av_frame_free(&frame_);
-}
-
-uint8_t Frame::Release() {
-  if (consumers_waiting_)
-    --consumers_waiting_;
-  if (!consumers_waiting_)
-    Free(false);
-  return consumers_waiting_;
-}
-
-void Frame::ReleaseAll() {
-  if (!consumers_waiting_) 
-    Free(false);
-  consumers_waiting_ = 0;
 }
 
 bool Frame::operator==(const Frame &other) {

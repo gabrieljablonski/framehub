@@ -50,7 +50,6 @@ uint64_t last_dtss[MAX_STREAMS] = { 0 };
 
 FrameQueue frames(MAX_FRAMES);
 pthread_mutex_t producer_connected;
-uint8_t consumers_connected = 0;
 
 int open_input_codec(AVFormatContext *avctx, AVCodecContext **ctx, AVMediaType type) {
   AVCodec *codec;
@@ -229,7 +228,7 @@ void *producer_handler(void *ptr) {
       if (send_pkt_receive_frame(pctx, &ppkt, pframe) < 0) {
         goto producer_fail;
       }
-      frames.PushBack(new Frame(pframe, ppkt.dts, consumers_connected, ppkt.stream_index, pkts++));
+      frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, pkts++));
 read_frame_end:
       av_packet_unref(&ppkt);
     }
@@ -286,7 +285,7 @@ static void *consumer_handler(void *ptr) {
     avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
   }
 
-  ++consumers_connected;
+  frames.AddConsumer();
   pthread_t next_consumer;
   pthread_create(&next_consumer, NULL, consumer_handler, ptr);
 
@@ -310,7 +309,7 @@ static void *consumer_handler(void *ptr) {
       continue;
     }
 
-    Frame *frame = frames.PopFront()->Clone();
+    Frame *frame = frames.PopFront();
     AVCodecContext *ctx = frame->GetStream() ? audio_codec_context : video_codec_context;
 
     last_frame = frame->GetNumber();
@@ -345,12 +344,12 @@ static void *consumer_handler(void *ptr) {
     error_count = 0;
 write_frame_end:
     av_packet_unref(&cpkt);
-    frame->Release();
+    frame->Free();
     if (ret)
       goto consumer_fail;
   }
 consumer_fail:
-  --consumers_connected;
+  frames.RemoveConsumer();
   avcodec_flush_buffers(video_codec_context);
   avcodec_flush_buffers(audio_codec_context);
   avformat_free_context(consumer_context);

@@ -13,9 +13,21 @@ FrameQueue::FrameQueue() {}
 
 FrameQueue::FrameQueue(size_t max_frames) : max_frames_(max_frames) {}
 
+uint8_t FrameQueue::GetConsumerCount() {
+  return consumer_count_;
+}
+
+uint8_t FrameQueue::AddConsumer() {
+  return ++consumer_count_;
+}
+
+uint8_t FrameQueue::RemoveConsumer() {
+  return --consumer_count_;
+}
+
 void FrameQueue::Destroy() {
   for (auto it = frames_.cbegin(); it != frames_.cend(); ++it) {
-    ((Frame*)*it)->Free(true);
+    ((Frame*)*it)->Free();
   }
   frames_.clear();
 }
@@ -28,7 +40,7 @@ void FrameQueue::PushBack(Frame *frame) {
   std::unique_lock<std::mutex> lk(mutex_);
   frames_.push_back(frame);
   while (frames_.size() > max_frames_) {
-    frames_.front()->ReleaseAll();
+    frames_.front()->Free();
     frames_.pop_front();
   }
   lk.unlock();
@@ -50,10 +62,13 @@ Frame* FrameQueue::PopFront() {
   }
 
   Frame *frame = frames_.front();
-  if (frame->GetConsumersWaiting() == 1)
+  Frame *clone = frame->Clone();
+  if (frame->GetClonedCount() == consumer_count_) {
+    frame->Free();
     frames_.pop_front();
+  }
 
-  return frame;
+  return clone;
 }
 
 } // namespace framehub
