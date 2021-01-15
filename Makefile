@@ -1,8 +1,8 @@
 CC=g++
 CFLAGS=-I.
 LIBS=-pthread -lavformat -lavutil -lavcodec
-DEPS=
-OBJS=frame_hub.o
+DEPS=frame_queue.h frame.h
+OBJS=frame_hub.o frame_queue.o frame.o
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS) $(LIBS)

@@ -9,6 +9,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+#include "frame_queue.h"
+
 void print_trace(int nSig)
 {
   printf("print_trace: got signal %d\n", nSig);
@@ -29,68 +31,6 @@ void print_trace(int nSig)
   exit(-1);
 }
 
-#define MAX_ERRORS 10
-#define MAX_STREAMS 2
-AVFormatContext *producer_context;
-uint64_t dts_offsets[MAX_STREAMS] = { 0 };
-uint64_t last_dtss[MAX_STREAMS] = { 0 };
-
-typedef struct {
-  AVFrame *video;
-  int64_t video_dts;
-  AVFrame *audio1;
-  int64_t audio1_dts;
-  AVFrame *audio2;
-  int64_t audio2_dts;
-  bool ready;
-  bool has_audio2;
-} Frame;
-
-Frame frame_writing;
-Frame frame_reading;
-pthread_mutex_t producer_connected;
-
-Frame clone_frame(Frame *frame) {
-  Frame clone;
-  clone.video = av_frame_clone(frame->video);
-  clone.audio1 = av_frame_clone(frame->audio1);
-  clone.audio2 = av_frame_clone(frame->audio2);
-  clone.video_dts = frame->video_dts;
-  clone.audio1_dts = frame->audio1_dts;
-  clone.audio2_dts = frame->audio2_dts;
-  clone.ready = frame->ready;
-  clone.has_audio2 = frame->has_audio2;
-  return clone;
-}
-
-void alloc_frame(Frame *frame) {
-  frame->video = av_frame_alloc();
-  frame->audio1 = av_frame_alloc();
-  frame->audio2 = av_frame_alloc();
-}
-
-void free_frame(Frame *frame) {
-  av_frame_free(&frame->video);
-  av_frame_free(&frame->audio1);
-  av_frame_free(&frame->audio2);
-}
-
-void unref_frame(Frame *frame) {
-  av_frame_unref(frame->video);
-  av_frame_unref(frame->audio1);
-  av_frame_unref(frame->audio2);
-}
-
-void switch_frames() {
-  Frame interim = frame_writing;
-  frame_writing = frame_reading;
-  frame_reading = interim;
-  frame_reading.ready = true;
-
-  frame_writing.ready = false;
-  frame_writing.has_audio2 = false;
-}
-
 void lock_mutex(pthread_mutex_t *mutex) {
   pthread_mutex_lock(mutex);
 }
@@ -98,6 +38,19 @@ void lock_mutex(pthread_mutex_t *mutex) {
 void unlock_mutex(pthread_mutex_t *mutex) {
   pthread_mutex_unlock(mutex);
 }
+
+namespace framehub {
+
+#define MAX_FRAMES 10
+#define MAX_ERRORS 10
+#define MAX_STREAMS 2
+AVFormatContext *producer_context;
+uint64_t dts_offsets[MAX_STREAMS] = { 0 };
+uint64_t last_dtss[MAX_STREAMS] = { 0 };
+
+FrameQueue frames(MAX_FRAMES);
+pthread_mutex_t producer_connected;
+uint8_t consumers_connected = 0;
 
 int open_input_codec(AVFormatContext *avctx, AVCodecContext **ctx, AVMediaType type) {
   AVCodec *codec;
@@ -206,6 +159,9 @@ void *producer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
+  int64_t v_dts = 0;
+  int64_t a_dts = 0;
+  int pkts = 1;
 
   int video_stream = -1;
   int audio_stream = -1;
@@ -235,6 +191,7 @@ void *producer_handler(void *ptr) {
     }
 
     av_dump_format(producer_context, 0, url, 0);
+    std::cerr << "\n\n";
 
     if ((video_stream = open_input_codec(producer_context, &video_codec_context, AVMEDIA_TYPE_VIDEO)) < 0) {
       goto producer_fail;
@@ -244,15 +201,11 @@ void *producer_handler(void *ptr) {
       goto producer_fail;
     }
 
-    alloc_frame(&frame_writing);
-    alloc_frame(&frame_reading);
-
     unlock_mutex(&producer_connected);
-
     while (1) {
       AVPacket ppkt;
       AVCodecContext *pctx;
-      AVFrame *pframe;
+      AVFrame *pframe = av_frame_alloc();
       ret = av_read_frame(producer_context, &ppkt);
       if (ret == AVERROR_EOF) {
         std::cerr << "producer EOF " << ret << std::endl;
@@ -271,51 +224,12 @@ void *producer_handler(void *ptr) {
       ppkt.pts = ppkt.dts;
       last_dtss[ppkt.stream_index] = ppkt.dts;
 
-      pctx = audio_codec_context;
-      pframe = frame_writing.audio2;
-      if (ppkt.stream_index == video_stream) {
-        switch_frames();
-        pctx = video_codec_context;
-        pframe = frame_writing.video;
-      }
+      pctx = ppkt.stream_index == video_stream ? video_codec_context : audio_codec_context;
 
       if (send_pkt_receive_frame(pctx, &ppkt, pframe) < 0) {
         goto producer_fail;
       }
-
-      if (ppkt.stream_index == audio_stream) {
-        frame_writing.audio2_dts = ppkt.dts;
-        frame_writing.has_audio2 = true;
-        av_packet_unref(&ppkt);
-        goto read_frame_end;
-      }
-      frame_writing.video_dts = ppkt.dts;
-
-      av_packet_unref(&ppkt);
-      ret = av_read_frame(producer_context, &ppkt);
-      if (ret == AVERROR_EOF) {
-        std::cerr << "producer EOF " << ret << std::endl;
-        goto producer_fail;
-      }
-      if (ret < 0) {
-        ++error_count;
-        std::cerr << "failed to read frame " << ret << std::endl;
-        if (error_count > MAX_ERRORS)
-          goto producer_fail;
-        goto read_frame_end;
-      }
-
-      ppkt.dts += dts_offsets[ppkt.stream_index];
-      ppkt.pts = ppkt.dts;
-      last_dtss[ppkt.stream_index] = ppkt.dts;
-
-      pctx = audio_codec_context;
-      pframe = frame_writing.audio1;
-
-      if (send_pkt_receive_frame(pctx, &ppkt, pframe) < 0) {
-        goto producer_fail;
-      }
-      frame_writing.audio1_dts = ppkt.dts;
+      frames.PushBack(new Frame(pframe, ppkt.dts, consumers_connected, ppkt.stream_index, pkts++));
 read_frame_end:
       av_packet_unref(&ppkt);
     }
@@ -325,8 +239,6 @@ producer_fail:
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
     avcodec_free_context(&video_codec_context);
-    free_frame(&frame_writing);
-    free_frame(&frame_reading);
     producer_context = NULL;
     std::cerr << "producer dropped\n";
   }
@@ -339,7 +251,8 @@ static void *consumer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
-  AVFrame *last_frame = NULL;
+  uint64_t last_frame = 0;
+  int pkts = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -367,10 +280,13 @@ static void *consumer_handler(void *ptr) {
   unlock_mutex(&producer_connected);
   
   av_dump_format(consumer_context, 0, url, 1);
+  std::cerr << "\n\n";
 
   if (!(consumer_context->oformat->flags & AVFMT_NOFILE)) {
     avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
   }
+
+  ++consumers_connected;
   pthread_t next_consumer;
   pthread_create(&next_consumer, NULL, consumer_handler, ptr);
 
@@ -389,106 +305,52 @@ static void *consumer_handler(void *ptr) {
   }
 
   while (1) {
-    if (!frame_reading.ready || !frame_reading.video || last_frame == frame_reading.video) {
+    while (last_frame == frames.Front()->GetNumber()) {
       usleep(1000);
       continue;
     }
 
-    last_frame = frame_reading.video;
+    Frame *frame = frames.PopFront()->Clone();
+    AVCodecContext *ctx = frame->GetStream() ? audio_codec_context : video_codec_context;
 
+    last_frame = frame->GetNumber();
     AVPacket cpkt;
-    Frame cframe = clone_frame(&frame_reading);
-    ret = avcodec_send_frame(video_codec_context, cframe.video);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
+    ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {
       std::cerr << "`avcodec_send_frame()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    ret = avcodec_receive_packet(video_codec_context, &cpkt);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
-    if (ret < 0) {
-      std::cerr << "`avcodec_receive_packet()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    cpkt.dts = cframe.video_dts;
-    cpkt.stream_index = video_stream;
-    ret = av_write_frame(consumer_context, &cpkt);
-    if (ret < 0) {
-      std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-      ++error_count;
-      if (error_count > MAX_ERRORS)
-        goto consumer_fail;
+      if (ret == AVERROR_EOF)
+        ret = 0;
       goto write_frame_end;
     }
 
-    ret = avcodec_send_frame(audio_codec_context, cframe.audio1);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
-    if (ret < 0) {
-      std::cerr << "`avcodec_send_frame()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    av_packet_unref(&cpkt);
-    ret = avcodec_receive_packet(audio_codec_context, &cpkt);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
+    ret = avcodec_receive_packet(ctx, &cpkt);
     if (ret < 0) {
       std::cerr << "`avcodec_receive_packet()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    cpkt.dts = cframe.audio1_dts;
-    cpkt.stream_index = audio_stream;
-    ret = av_write_frame(consumer_context, &cpkt);
-    if (ret < 0) {
-      std::cerr << "`av_write_frame()` failed " << ret << std::endl;
-      ++error_count;
-      if (error_count > MAX_ERRORS)
-        goto consumer_fail;
+      if (ret == AVERROR_EOF)
+        ret = 0;
       goto write_frame_end;
     }
 
-    if (!cframe.has_audio2)
-      goto write_frame_end;
-      
-    ret = avcodec_send_frame(audio_codec_context, cframe.audio2);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
-    if (ret < 0) {
-      std::cerr << "`avcodec_send_frame()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    av_packet_unref(&cpkt);
-    ret = avcodec_receive_packet(audio_codec_context, &cpkt);
-    if (ret == AVERROR_EOF) {
-      goto write_frame_end;
-    }
-    if (ret < 0) {
-      std::cerr << "`avcodec_receive_packet()` failed " << ret << std::endl;
-      goto consumer_fail;
-    }
-    cpkt.dts = cframe.audio2_dts;
-    cpkt.stream_index = audio_stream;
+    cpkt.dts = frame->GetDts();
+    cpkt.stream_index = frame->GetStream();
+
     ret = av_write_frame(consumer_context, &cpkt);
     if (ret < 0) {
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
       ++error_count;
-      if (error_count > MAX_ERRORS)
-        goto consumer_fail;
+      if (error_count <= MAX_ERRORS)
+        ret = 0;
       goto write_frame_end;
     }
     error_count = 0;
 write_frame_end:
     av_packet_unref(&cpkt);
-    free_frame(&cframe);
+    frame->Release();
+    if (ret)
+      goto consumer_fail;
   }
 consumer_fail:
+  --consumers_connected;
   avcodec_flush_buffers(video_codec_context);
   avcodec_flush_buffers(audio_codec_context);
   avformat_free_context(consumer_context);
@@ -518,4 +380,10 @@ int main(int argc, char **argv) {
   pthread_join(consumer_thread, NULL);
   pthread_mutex_destroy(&producer_connected);
   return 0;
+}
+
+} // namespace framehub
+
+int main(int argc, char **argv) {
+  framehub::main(argc, argv);
 }
