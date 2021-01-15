@@ -2,4 +2,4 @@
 *.o
 hub
 pkt_hub
-frame_hub
+frame-hub

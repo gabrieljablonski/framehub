@@ -41,14 +41,14 @@ void unlock_mutex(pthread_mutex_t *mutex) {
 
 namespace framehub {
 
-#define MAX_FRAMES 10
+#define FRAME_TTL_US 2*33367
 #define MAX_ERRORS 10
 #define MAX_STREAMS 2
 AVFormatContext *producer_context;
 uint64_t dts_offsets[MAX_STREAMS] = { 0 };
 uint64_t last_dtss[MAX_STREAMS] = { 0 };
 
-FrameQueue frames(MAX_FRAMES);
+FrameQueue frames;
 pthread_mutex_t producer_connected;
 
 int open_input_codec(AVFormatContext *avctx, AVCodecContext **ctx, AVMediaType type) {
@@ -160,7 +160,8 @@ void *producer_handler(void *ptr) {
   int error_count = 0;
   int64_t v_dts = 0;
   int64_t a_dts = 0;
-  int pkts = 1;
+  int frame_count = 1;
+  Frame *f;
 
   int video_stream = -1;
   int audio_stream = -1;
@@ -228,7 +229,17 @@ void *producer_handler(void *ptr) {
       if (send_pkt_receive_frame(pctx, &ppkt, pframe) < 0) {
         goto producer_fail;
       }
-      frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, pkts++));
+      {
+        uint64_t ttl = 0;
+        if (ppkt.stream_index == video_stream) {
+          AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
+          ttl = (1000000*fps.den)/fps.num;
+        } else if (ppkt.stream_index == audio_stream) {
+          ttl = 100;
+        }
+        f = new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, ttl);
+      }
+      frames.PushBack(f);
 read_frame_end:
       av_packet_unref(&ppkt);
     }
@@ -251,7 +262,6 @@ static void *consumer_handler(void *ptr) {
   char url[1024];
   int error_count = 0;
   uint64_t last_frame = 0;
-  int pkts = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -285,7 +295,6 @@ static void *consumer_handler(void *ptr) {
     avio_open(&consumer_context->pb, url, AVIO_FLAG_WRITE);
   }
 
-  frames.AddConsumer();
   pthread_t next_consumer;
   pthread_create(&next_consumer, NULL, consumer_handler, ptr);
 
@@ -304,12 +313,12 @@ static void *consumer_handler(void *ptr) {
   }
 
   while (1) {
-    while (last_frame == frames.Front()->GetNumber()) {
-      usleep(1000);
+    if (last_frame == frames.GetFrontNumber()) {
+      usleep(1000); // TODO: wait for PopFront() signal
       continue;
     }
 
-    Frame *frame = frames.PopFront();
+    Frame *frame = frames.CloneFront();
     AVCodecContext *ctx = frame->GetStream() ? audio_codec_context : video_codec_context;
 
     last_frame = frame->GetNumber();
@@ -349,7 +358,6 @@ write_frame_end:
       goto consumer_fail;
   }
 consumer_fail:
-  frames.RemoveConsumer();
   avcodec_flush_buffers(video_codec_context);
   avcodec_flush_buffers(audio_codec_context);
   avformat_free_context(consumer_context);
@@ -357,8 +365,16 @@ consumer_fail:
   return 0;
 }
 
+void *dispose_frames(void *ptr) {
+  while (1) {
+    usleep(1000);
+    frames.TryPopFront();
+    
+  }
+}
+
 int main(int argc, char **argv) {
-  pthread_t producer_thread, consumer_thread;
+  pthread_t producer_thread, consumer_thread, dispose_thread;
   int producer_port = 5000,
       consumers_port = 5001;
 
@@ -375,8 +391,10 @@ int main(int argc, char **argv) {
   lock_mutex(&producer_connected);
   pthread_create(&producer_thread, NULL, producer_handler, &producer_port);
   pthread_create(&consumer_thread, NULL, consumer_handler, &consumers_port);
+  pthread_create(&dispose_thread, NULL, dispose_frames, NULL);
   pthread_join(producer_thread, NULL);
   pthread_join(consumer_thread, NULL);
+  pthread_join(dispose_thread, NULL);
   pthread_mutex_destroy(&producer_connected);
   return 0;
 }

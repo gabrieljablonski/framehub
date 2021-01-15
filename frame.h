@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <mutex>
+#include <chrono>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -16,22 +17,21 @@ class Frame {
     int64_t dts_;
     int stream_;
     uint64_t number_;
-    uint8_t cloned_count_;
-    std::mutex mutex_;
+    std::chrono::steady_clock::time_point live_until_;
 
   public:
     Frame();
     Frame(const Frame &f);
     Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number);
+    Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number, uint64_t ttl_us);
 
     AVFrame* GetFrame();
     int64_t GetDts();
     int GetStream();
     uint64_t GetNumber();
-    uint8_t GetClonedCount();
+    bool ShouldDispose();
     Frame* Clone();
     void Free();
-    bool operator==(const Frame &other);
 };
 
 }

@@ -7,7 +7,7 @@ OBJS=frame_hub.o frame_queue.o frame.o
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS) $(LIBS)
 
-frame_hub: $(OBJS)
+frame-hub: $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 .PHONY: clean

@@ -11,19 +11,7 @@ namespace framehub {
 
 FrameQueue::FrameQueue() {}
 
-FrameQueue::FrameQueue(size_t max_frames) : max_frames_(max_frames) {}
-
-uint8_t FrameQueue::GetConsumerCount() {
-  return consumer_count_;
-}
-
-uint8_t FrameQueue::AddConsumer() {
-  return ++consumer_count_;
-}
-
-uint8_t FrameQueue::RemoveConsumer() {
-  return --consumer_count_;
-}
+FrameQueue::~FrameQueue() {}
 
 void FrameQueue::Destroy() {
   for (auto it = frames_.cbegin(); it != frames_.cend(); ++it) {
@@ -33,21 +21,23 @@ void FrameQueue::Destroy() {
 }
 
 size_t FrameQueue::Size() {
+  std::unique_lock<std::mutex> lk(mutex_);
   return frames_.size();
+}
+
+uint64_t FrameQueue::GetFrontNumber() {
+  std::unique_lock<std::mutex> lk(mutex_);
+  return frames_.size() ? frames_.front()->GetNumber() : 0;
 }
 
 void FrameQueue::PushBack(Frame *frame) {
   std::unique_lock<std::mutex> lk(mutex_);
   frames_.push_back(frame);
-  while (frames_.size() > max_frames_) {
-    frames_.front()->Free();
-    frames_.pop_front();
-  }
   lk.unlock();
   cv_.notify_all();
 }
 
-Frame* FrameQueue::Front() {
+Frame* FrameQueue::PeekFront() {
   std::unique_lock<std::mutex> lk(mutex_);
   if (!frames_.size()) {
     cv_.wait(lk);
@@ -55,20 +45,22 @@ Frame* FrameQueue::Front() {
   return frames_.front();
 }
 
-Frame* FrameQueue::PopFront() {
+Frame* FrameQueue::CloneFront() {
   std::unique_lock<std::mutex> lk(mutex_);
   if (!frames_.size()) {
     cv_.wait(lk);
   }
 
-  Frame *frame = frames_.front();
-  Frame *clone = frame->Clone();
-  if (frame->GetClonedCount() == consumer_count_) {
-    frame->Free();
-    frames_.pop_front();
-  }
+  return frames_.front()->Clone();
+}
 
-  return clone;
+void FrameQueue::TryPopFront() {
+  std::unique_lock<std::mutex> lk(mutex_);
+  if (!frames_.size() || !frames_.front()->ShouldDispose())
+    return;
+
+  frames_.front()->Free();
+  frames_.pop_front();
 }
 
 } // namespace framehub
