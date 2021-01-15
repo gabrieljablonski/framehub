@@ -13,7 +13,6 @@ class FrameQueue {
   private:
     std::deque<Frame *> frames_;
     std::mutex mutex_;
-    std::condition_variable cv_;
 
   public:
     FrameQueue();

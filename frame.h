@@ -23,7 +23,7 @@ class Frame {
     Frame();
     Frame(const Frame &f);
     Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number);
-    Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number, uint64_t ttl_us);
+    Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number, std::chrono::steady_clock::time_point ttl_us);
 
     AVFrame* GetFrame();
     int64_t GetDts();

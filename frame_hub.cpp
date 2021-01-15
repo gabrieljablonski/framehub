@@ -48,7 +48,8 @@ AVFormatContext *producer_context;
 uint64_t dts_offsets[MAX_STREAMS] = { 0 };
 uint64_t last_dtss[MAX_STREAMS] = { 0 };
 
-FrameQueue frames;
+FrameQueue video_frames;
+FrameQueue audio_frames;
 pthread_mutex_t producer_connected;
 
 int open_input_codec(AVFormatContext *avctx, AVCodecContext **ctx, AVMediaType type) {
@@ -161,7 +162,8 @@ void *producer_handler(void *ptr) {
   int64_t v_dts = 0;
   int64_t a_dts = 0;
   int frame_count = 1;
-  Frame *f;
+  std::chrono::steady_clock::time_point video_live_until;
+  std::chrono::steady_clock::time_point audio_live_until;
 
   int video_stream = -1;
   int audio_stream = -1;
@@ -202,6 +204,8 @@ void *producer_handler(void *ptr) {
     }
 
     unlock_mutex(&producer_connected);
+    video_live_until = std::chrono::steady_clock::now();
+    audio_live_until = std::chrono::steady_clock::now();
     while (1) {
       AVPacket ppkt;
       AVCodecContext *pctx;
@@ -230,16 +234,15 @@ void *producer_handler(void *ptr) {
         goto producer_fail;
       }
       {
-        uint64_t ttl = 0;
         if (ppkt.stream_index == video_stream) {
           AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
-          ttl = (1000000*fps.den)/fps.num;
+          video_live_until += std::chrono::microseconds((1000000*fps.den)/fps.num);
+          video_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, video_live_until));
         } else if (ppkt.stream_index == audio_stream) {
-          ttl = 100;
+          audio_live_until += std::chrono::microseconds(10000);
+          audio_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, audio_live_until));
         }
-        f = new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, ttl);
-      }
-      frames.PushBack(f);
+    }
 read_frame_end:
       av_packet_unref(&ppkt);
     }
@@ -261,7 +264,8 @@ static void *consumer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
-  uint64_t last_frame = 0;
+  uint64_t last_video_frame = 0;
+  uint64_t last_audio_frame = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -313,15 +317,30 @@ static void *consumer_handler(void *ptr) {
   }
 
   while (1) {
-    if (last_frame == frames.GetFrontNumber()) {
+    if (last_video_frame == video_frames.GetFrontNumber() && last_audio_frame == audio_frames.GetFrontNumber()) {
       usleep(1000); // TODO: wait for PopFront() signal
       continue;
     }
 
-    Frame *frame = frames.CloneFront();
+    Frame *frame;
+
+    if (last_video_frame != video_frames.GetFrontNumber()) {
+      frame = video_frames.CloneFront();
+    }
+    else {
+      frame = audio_frames.CloneFront();
+    }
+    if (!frame) continue;
+
     AVCodecContext *ctx = frame->GetStream() ? audio_codec_context : video_codec_context;
 
-    last_frame = frame->GetNumber();
+    if (frame->GetStream() == video_stream) {
+      last_video_frame = frame->GetNumber();
+    }
+    else {
+      last_audio_frame = frame->GetNumber();
+    }
+
     AVPacket cpkt;
     ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {
@@ -367,9 +386,9 @@ consumer_fail:
 
 void *dispose_frames(void *ptr) {
   while (1) {
-    usleep(1000);
-    frames.TryPopFront();
-    
+    usleep(250);
+    video_frames.TryPopFront();
+    audio_frames.TryPopFront();
   }
 }
 

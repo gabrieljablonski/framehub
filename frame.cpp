@@ -17,13 +17,10 @@ Frame::Frame(const Frame &f)
   : frame_(f.frame_), dts_(f.dts_), stream_(f.stream_), number_(f.number_) {}
 
 Frame::Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number) 
-  : Frame(frame, dts, stream, number, 0) {}
+  : Frame(frame, dts, stream, number, std::chrono::steady_clock::now()) {}
 
-Frame::Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number, uint64_t ttl_us) 
-  : frame_(frame), dts_(dts), stream_(stream), number_(number) {
-    std::chrono::microseconds ttl(ttl_us);
-    live_until_ = std::chrono::steady_clock::time_point(std::chrono::steady_clock::now() + ttl);
-}
+Frame::Frame(AVFrame *frame, int64_t dts, int stream, uint64_t number, std::chrono::steady_clock::time_point live_until) 
+  : frame_(frame), dts_(dts), stream_(stream), number_(number), live_until_(live_until) {}
 
 AVFrame* Frame::GetFrame() {
   return frame_;

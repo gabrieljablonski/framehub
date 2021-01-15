@@ -33,24 +33,19 @@ uint64_t FrameQueue::GetFrontNumber() {
 void FrameQueue::PushBack(Frame *frame) {
   std::unique_lock<std::mutex> lk(mutex_);
   frames_.push_back(frame);
-  lk.unlock();
-  cv_.notify_all();
 }
 
 Frame* FrameQueue::PeekFront() {
   std::unique_lock<std::mutex> lk(mutex_);
-  if (!frames_.size()) {
-    cv_.wait(lk);
-  }
+  if (!frames_.size())
+    return NULL;
   return frames_.front();
 }
 
 Frame* FrameQueue::CloneFront() {
   std::unique_lock<std::mutex> lk(mutex_);
-  if (!frames_.size()) {
-    cv_.wait(lk);
-  }
-
+  if (!frames_.size())
+    return NULL;
   return frames_.front()->Clone();
 }
 
@@ -58,7 +53,6 @@ void FrameQueue::TryPopFront() {
   std::unique_lock<std::mutex> lk(mutex_);
   if (!frames_.size() || !frames_.front()->ShouldDispose())
     return;
-
   frames_.front()->Free();
   frames_.pop_front();
 }
