@@ -17,8 +17,6 @@ class FrameQueue {
   public:
     FrameQueue();
     ~FrameQueue();
-    void Lock();
-    void Unlock();
     uint64_t GetFrontNumber();
     size_t Size();
     void Destroy();

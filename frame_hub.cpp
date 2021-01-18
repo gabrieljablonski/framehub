@@ -161,9 +161,11 @@ void *producer_handler(void *ptr) {
   int error_count = 0;
   int64_t v_dts = 0;
   int64_t a_dts = 0;
-  int frame_count = 1;
+  int video_frame_count = 1;
+  int audio_frame_count = 1;
   std::chrono::steady_clock::time_point video_live_until;
   std::chrono::steady_clock::time_point audio_live_until;
+  auto start = std::chrono::steady_clock::now();
 
   int video_stream = -1;
   int audio_stream = -1;
@@ -236,11 +238,22 @@ void *producer_handler(void *ptr) {
       {
         if (ppkt.stream_index == video_stream) {
           AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
+          if (video_frame_count % 10)
+            video_live_until = std::chrono::steady_clock::now();  
           video_live_until += std::chrono::microseconds((1000000*fps.den)/fps.num);
-          video_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, video_live_until));
+          // std::cerr << std::chrono::duration_cast<std::chrono::microseconds>(video_live_until - start).count() << std::endl;
+          video_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, video_frame_count++, video_live_until));
+          if (ppkt.dts != v_dts + ppkt.duration)
+            std::cerr << "p:" << video_frame_count - 1 << " " << ppkt.dts << " **** dropped video frame\n";
+          v_dts = ppkt.dts;
+          // std::cerr << "v:" << video_frame_count - 1 << ":" << v_dts << std::endl;
         } else if (ppkt.stream_index == audio_stream) {
-          audio_live_until += std::chrono::microseconds(10000);
-          audio_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, audio_live_until));
+          audio_live_until += std::chrono::microseconds((1000000 / (pframe->sample_rate/pframe->nb_samples)));
+          audio_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, video_frame_count++, audio_live_until));
+          // if (ppkt.dts != a_dts + ppkt.duration)
+          //   std::cerr << "p:" << audio_frame_count - 1 << " " << ppkt.dts << " **** dropped audio frame\n";
+          // std::cerr << "a:" << ppkt.dts - a_dts << std::endl;
+          a_dts = ppkt.dts;
         }
     }
 read_frame_end:
@@ -266,12 +279,11 @@ static void *consumer_handler(void *ptr) {
   int error_count = 0;
   uint64_t last_video_frame = 0;
   uint64_t last_audio_frame = 0;
+  uint64_t last_frame = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
-  int video_stream = -1;
-  int audio_stream = -1;
-  
+
   sprintf(url, "tcp://0.0.0.0:%d?listen", port);
 
   std::cerr << "setting up output to " << url << std::endl;
@@ -283,10 +295,10 @@ static void *consumer_handler(void *ptr) {
 
   lock_mutex(&producer_connected);
 
-  if ((video_stream = open_output_codec(producer_context, consumer_context, &video_codec_context, AVMEDIA_TYPE_VIDEO)) < 0) {
+  if (open_output_codec(producer_context, consumer_context, &video_codec_context, AVMEDIA_TYPE_VIDEO) < 0) {
     goto consumer_fail;
   }
-  if ((audio_stream = open_output_codec(producer_context, consumer_context, &audio_codec_context, AVMEDIA_TYPE_AUDIO)) < 0) {
+  if (open_output_codec(producer_context, consumer_context, &audio_codec_context, AVMEDIA_TYPE_AUDIO) < 0) {
     goto consumer_fail;
   }
   
@@ -315,33 +327,42 @@ static void *consumer_handler(void *ptr) {
       goto consumer_fail;
     }
   }
-
   while (1) {
+    // if (last_video_frame == video_frames.GetFrontNumber()) {
     if (last_video_frame == video_frames.GetFrontNumber() && last_audio_frame == audio_frames.GetFrontNumber()) {
-      usleep(1000); // TODO: wait for PopFront() signal
+      usleep(500); // TODO: wait for PopFront() signal
       continue;
     }
 
-    Frame *frame;
+    bool is_video;
 
-    if (last_video_frame != video_frames.GetFrontNumber()) {
-      frame = video_frames.CloneFront();
-    }
-    else {
-      frame = audio_frames.CloneFront();
-    }
-    if (!frame) continue;
-
-    AVCodecContext *ctx = frame->GetStream() ? audio_codec_context : video_codec_context;
-
-    if (frame->GetStream() == video_stream) {
-      last_video_frame = frame->GetNumber();
-    }
-    else {
-      last_audio_frame = frame->GetNumber();
+    if (last_video_frame == video_frames.GetFrontNumber()) {
+      is_video = false;
+    } else {
+      if (last_audio_frame != audio_frames.GetFrontNumber()) {
+        is_video = video_frames.GetFrontNumber() < audio_frames.GetFrontNumber();
+      } else is_video = true;
     }
 
-    AVPacket cpkt;
+    Frame *frame = is_video ? video_frames.CloneFront() : audio_frames.CloneFront();
+
+    if (!frame) {
+      usleep(500); // TODO: wait for PopFront() signal
+      continue;
+    }
+
+    // if (last_frame && frame->GetNumber() != last_frame + 1) {
+    //   std::cerr << "c:" << last_frame + 1 << " **** dropped " << (is_video ? "video frame\n" : "audio frame\n");
+    // }
+
+    if (is_video) {
+      last_frame = last_video_frame = frame->GetNumber();
+    } else {
+      last_frame = last_audio_frame = frame->GetNumber();
+      // goto write_frame_end;
+    }
+
+    AVCodecContext *ctx = is_video ? video_codec_context : audio_codec_context;
     ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {
       std::cerr << "`avcodec_send_frame()` failed " << ret << std::endl;
@@ -350,6 +371,7 @@ static void *consumer_handler(void *ptr) {
       goto write_frame_end;
     }
 
+    AVPacket cpkt;
     ret = avcodec_receive_packet(ctx, &cpkt);
     if (ret < 0) {
       std::cerr << "`avcodec_receive_packet()` failed " << ret << std::endl;
@@ -360,7 +382,6 @@ static void *consumer_handler(void *ptr) {
 
     cpkt.dts = frame->GetDts();
     cpkt.stream_index = frame->GetStream();
-
     ret = av_write_frame(consumer_context, &cpkt);
     if (ret < 0) {
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
@@ -377,8 +398,8 @@ write_frame_end:
       goto consumer_fail;
   }
 consumer_fail:
-  avcodec_flush_buffers(video_codec_context);
-  avcodec_flush_buffers(audio_codec_context);
+  // avcodec_flush_buffers(video_codec_context);
+  // avcodec_flush_buffers(audio_codec_context);
   avformat_free_context(consumer_context);
   std::cerr << "consumer dropped\n";
   return 0;
@@ -386,7 +407,7 @@ consumer_fail:
 
 void *dispose_frames(void *ptr) {
   while (1) {
-    usleep(250);
+    usleep(1000);
     video_frames.TryPopFront();
     audio_frames.TryPopFront();
   }
