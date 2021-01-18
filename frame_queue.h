@@ -17,6 +17,7 @@ class FrameQueue {
   public:
     FrameQueue();
     ~FrameQueue();
+    std::unique_lock<std::mutex> GetLock();
     uint64_t GetFrontNumber();
     size_t Size();
     void Destroy();
