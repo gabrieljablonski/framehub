@@ -1,5 +1,5 @@
 # framehub
 
 ```
-  make && ./pkt_hub <producer-port> <consumers-port>
+  make && ./frame-hub <producer-port> <consumers-port>
 ```
