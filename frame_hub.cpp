@@ -162,6 +162,7 @@ void *producer_handler(void *ptr) {
   int64_t v_dts = 0;
   int64_t a_dts = 0;
   uint64_t frame_count = 1;
+  int vfcount = 0;
   std::chrono::steady_clock::time_point video_live_until;
   std::chrono::steady_clock::time_point audio_live_until;
   auto start = std::chrono::steady_clock::now();
@@ -205,6 +206,7 @@ void *producer_handler(void *ptr) {
     }
 
     unlock_mutex(&producer_connected);
+    vfcount = 0;
     video_live_until = std::chrono::steady_clock::now();
     audio_live_until = std::chrono::steady_clock::now();
     frame_count = 0;
@@ -214,7 +216,7 @@ void *producer_handler(void *ptr) {
       AVFrame *pframe = av_frame_alloc();
       ret = av_read_frame(producer_context, &ppkt);
       if (ret == AVERROR_EOF) {
-        std::cerr << "producer EOF " << ret << std::endl;
+        std::cerr << "producer EOF" << std::endl;
         goto producer_fail;
       }
       if (ret < 0) {
@@ -232,10 +234,11 @@ void *producer_handler(void *ptr) {
 
       pctx = ppkt.stream_index == video_stream ? video_codec_context : audio_codec_context;
 
-      if (send_pkt_receive_frame(pctx, &ppkt, pframe) < 0) {
+      if ((ret = send_pkt_receive_frame(pctx, &ppkt, pframe)) < 0) {
         goto producer_fail;
       }
       if (ppkt.stream_index == video_stream) {
+        std::cerr << "p:" << ++vfcount << std::endl;
         AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
         if (frame_count % 20)
           video_live_until = std::chrono::steady_clock::now();  
@@ -275,6 +278,7 @@ static void *consumer_handler(void *ptr) {
   uint64_t last_frame = 0;
   uint64_t last_video_frame = 0;
   uint64_t last_audio_frame = 0;
+  int vfcount = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -363,6 +367,8 @@ static void *consumer_handler(void *ptr) {
     else
       last_audio_frame = last_frame;
 
+    if (is_video)
+      std::cerr << ++vfcount << std::endl;
 
     ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {

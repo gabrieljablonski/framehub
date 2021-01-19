@@ -10,21 +10,21 @@
 namespace framehub {
 
 class FrameQueue {
-  private:
-    std::deque<Frame *> frames_;
-    std::mutex mutex_;
-
-  public:
-    FrameQueue();
-    ~FrameQueue();
-    std::unique_lock<std::mutex> GetLock();
-    uint64_t GetFrontNumber();
-    size_t Size();
-    void Destroy();
-    void PushBack(Frame *frame);
-    Frame* PeekFront();
-    Frame* CloneFront();
-    void TryPopFront();
+ public:
+  FrameQueue();
+  ~FrameQueue();
+  std::unique_lock<std::mutex> GetLock();
+  uint64_t GetFrontNumber();
+  size_t Size();
+  void Destroy();
+  void PushBack(Frame *frame);
+  Frame* PeekFront();
+  Frame* CloneFront();
+  void TryPopFront();
+ 
+ private:
+  std::deque<Frame *> frames_;
+  std::mutex mutex_;
 };
 
 } // namespace framehub
