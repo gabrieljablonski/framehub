@@ -14,12 +14,13 @@ class FrameQueue {
   FrameQueue();
   ~FrameQueue();
   std::unique_lock<std::mutex> GetLock();
-  uint64_t GetFrontNumber();
+  int64_t GetNextNumber(uint8_t consumer_id);
   size_t Size();
   void Destroy();
   void PushBack(Frame *frame);
   Frame* PeekFront();
-  Frame* CloneFront();
+  Frame* PeekNext(uint8_t consumer_id);
+  Frame* CloneNext(uint8_t consumer_id);
   void TryPopFront();
  
  private:

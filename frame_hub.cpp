@@ -51,6 +51,7 @@ uint64_t last_dtss[MAX_STREAMS] = { 0 };
 FrameQueue video_frames;
 FrameQueue audio_frames;
 pthread_mutex_t producer_connected;
+uint8_t consumers_connected = 0;
 
 int open_input_codec(AVFormatContext *avctx, AVCodecContext **ctx, AVMediaType type) {
   AVCodec *codec;
@@ -238,7 +239,7 @@ void *producer_handler(void *ptr) {
         goto producer_fail;
       }
       if (ppkt.stream_index == video_stream) {
-        std::cerr << "p:" << ++vfcount << std::endl;
+        // std::cerr << "p:" << ++vfcount << std::endl;
         AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
         if (frame_count % 20)
           video_live_until = std::chrono::steady_clock::now();  
@@ -250,8 +251,8 @@ void *producer_handler(void *ptr) {
       } else if (ppkt.stream_index == audio_stream) {
         audio_live_until += std::chrono::microseconds((1000000 / (pframe->sample_rate/pframe->nb_samples)));
         audio_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, audio_live_until));
-        if (ppkt.dts && ppkt.dts != a_dts + ppkt.duration)
-          std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " **** dropped audio frame\n";
+        // if (ppkt.dts && ppkt.dts != a_dts + ppkt.duration)
+        //   std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " **** dropped audio frame\n";
         a_dts = ppkt.dts;
       }
 read_frame_end:
@@ -275,10 +276,11 @@ static void *consumer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
-  uint64_t last_frame = 0;
-  uint64_t last_video_frame = 0;
-  uint64_t last_audio_frame = 0;
+  int64_t last_frame = -1;
+  int64_t last_video_frame = -1;
+  int64_t last_audio_frame = -1;
   int vfcount = 0;
+  uint8_t consumer_id = consumers_connected++;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -326,28 +328,38 @@ static void *consumer_handler(void *ptr) {
       goto consumer_fail;
     }
   }
+
   while (1) {
-    // std::cerr << "c:" << video_frames.Size() << ":" << audio_frames.Size() << std::endl;
-    // if (last_frame == video_frames.GetFrontNumber()) {
-    if (last_video_frame == video_frames.GetFrontNumber() && last_audio_frame == audio_frames.GetFrontNumber()) {
+    Frame *videof = video_frames.PeekNext(consumer_id);
+    Frame *audiof = audio_frames.PeekNext(consumer_id);
+    if (!videof && !audiof) {
       usleep(500); // TODO: wait for PopFront() signal
       continue;
     }
 
     bool is_video;
-
-    if (last_frame == video_frames.GetFrontNumber())
+    if (!videof) {
       is_video = false;
-    else if (last_frame == audio_frames.GetFrontNumber())
+    } else if (!audiof) {
       is_video = true;
-    else
-      is_video = video_frames.GetFrontNumber() && (video_frames.GetFrontNumber() < audio_frames.GetFrontNumber());
-
-    Frame *frame = is_video ? video_frames.CloneFront() : audio_frames.CloneFront();
-    if (!frame || (is_video && last_video_frame == frame->GetNumber()) || (!is_video && last_audio_frame == frame->GetNumber())) {
-      usleep(500); // TODO: wait for PopFront() signal
-      continue;
+    } else {
+      is_video = videof->GetNumber() < audiof->GetNumber();
     }
+
+    Frame *frame = (is_video ? videof : audiof)->Clone(consumer_id);
+    // std::cerr << frame->GetNumber() << std::endl;
+    // if (!frame || (is_video && last_video_frame == frame->GetNumber()) || (!is_video && last_audio_frame == frame->GetNumber())) {
+    //   if (frame)
+    //     frame->Free();
+    //   usleep(500); // TODO: wait for PopFront() signal
+    //   continue;
+    // }
+
+    // if (is_video) {
+    //   video_frames.TryPopFront();
+    // } else {
+    //   audio_frames.TryPopFront();
+    // }
 
     // if (last_frame && frame->GetNumber() != last_frame + 1) {
     //   std::cerr << "c:" << last_frame + 1 << " **** dropped " << (is_video ? "video frame\n" : "audio frame\n");
@@ -367,8 +379,9 @@ static void *consumer_handler(void *ptr) {
     else
       last_audio_frame = last_frame;
 
-    if (is_video)
-      std::cerr << ++vfcount << std::endl;
+    // std::cerr << last_frame << std::endl;
+    // if (is_video)
+    //   std::cerr << ++vfcount << std::endl;
 
     ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {

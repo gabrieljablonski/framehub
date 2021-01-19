@@ -15,9 +15,14 @@ FrameQueue::~FrameQueue() {}
 
 void FrameQueue::Destroy() {
   for (auto it = frames_.cbegin(); it != frames_.cend(); ++it) {
-    ((Frame*)*it)->Free();
+    ((Frame *)*it)->Free();
   }
   frames_.clear();
+}
+
+std::unique_lock<std::mutex> FrameQueue::GetLock() {
+  std::unique_lock<std::mutex> lk(mutex_, std::defer_lock);
+  return std::move(lk);
 }
 
 size_t FrameQueue::Size() {
@@ -25,9 +30,13 @@ size_t FrameQueue::Size() {
   return frames_.size();
 }
 
-uint64_t FrameQueue::GetFrontNumber() {
+int64_t FrameQueue::GetNextNumber(uint8_t consumer_id) {
   std::unique_lock<std::mutex> lk(mutex_);
-  return frames_.size() ? frames_.front()->GetNumber() : 0;
+  for (auto it = frames_.cbegin(); it != frames_.cend(); ++it) {
+    if (!((Frame *)*it)->WasConsumedBy(consumer_id))
+      return ((Frame *)*it)->GetNumber();
+  }
+  return -1;
 }
 
 void FrameQueue::PushBack(Frame *frame) {
@@ -42,18 +51,29 @@ Frame* FrameQueue::PeekFront() {
   return frames_.front();
 }
 
-Frame* FrameQueue::CloneFront() {
+Frame* FrameQueue::PeekNext(uint8_t consumer_id) {
   std::unique_lock<std::mutex> lk(mutex_);
-  if (!frames_.size())
-    return NULL;
-  return frames_.front()->Clone();
+  for (auto it = frames_.cbegin(); it != frames_.cend(); ++it) {
+    if (!((Frame *)*it)->WasConsumedBy(consumer_id))
+      return (Frame *)*it;
+  }
+  return NULL;
+}
+
+Frame* FrameQueue::CloneNext(uint8_t consumer_id) {
+  std::unique_lock<std::mutex> lk(mutex_);
+  for (auto it = frames_.begin(); it != frames_.end(); ++it) {
+    if (!((Frame *)*it)->WasConsumedBy(consumer_id))
+      return ((Frame *)*it)->Clone(consumer_id);
+  }
+  return NULL;
 }
 
 void FrameQueue::TryPopFront() {
   std::unique_lock<std::mutex> lk(mutex_);
   if (!frames_.size() || !frames_.front()->ShouldDispose())
     return;
-  frames_.front()->Free();
+  // frames_.front()->Free();
   frames_.pop_front();
 }
 
