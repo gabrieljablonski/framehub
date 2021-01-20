@@ -12,6 +12,7 @@ namespace framehub {
 class FrameQueue {
  public:
   FrameQueue();
+  FrameQueue(size_t min_size);
   ~FrameQueue();
   std::unique_lock<std::mutex> GetLock();
   int64_t GetNextNumber(uint8_t consumer_id);
@@ -24,6 +25,7 @@ class FrameQueue {
   void TryPopFront();
  
  private:
+  size_t min_size_;
   std::deque<Frame *> frames_;
   std::mutex mutex_;
 };

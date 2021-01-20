@@ -9,7 +9,9 @@
 
 namespace framehub {
 
-FrameQueue::FrameQueue() {}
+FrameQueue::FrameQueue() : FrameQueue(0) {}
+
+FrameQueue::FrameQueue(size_t min_size) : min_size_(min_size) {}
 
 FrameQueue::~FrameQueue() {}
 
@@ -71,9 +73,9 @@ Frame* FrameQueue::CloneNext(uint8_t consumer_id) {
 
 void FrameQueue::TryPopFront() {
   std::unique_lock<std::mutex> lk(mutex_);
-  if (!frames_.size() || !frames_.front()->ShouldDispose())
+  if (frames_.size() <= min_size_ || !frames_.front()->ShouldDispose())
     return;
-  // frames_.front()->Free();
+  frames_.front()->Free();
   frames_.pop_front();
 }
 

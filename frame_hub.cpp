@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <algorithm>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -48,8 +49,8 @@ AVFormatContext *producer_context;
 uint64_t dts_offsets[MAX_STREAMS] = { 0 };
 uint64_t last_dtss[MAX_STREAMS] = { 0 };
 
-FrameQueue video_frames;
-FrameQueue audio_frames;
+FrameQueue video_frames(3);
+FrameQueue audio_frames(5);
 pthread_mutex_t producer_connected;
 uint8_t consumers_connected = 0;
 
@@ -162,8 +163,9 @@ void *producer_handler(void *ptr) {
   int error_count = 0;
   int64_t v_dts = 0;
   int64_t a_dts = 0;
-  uint64_t frame_count = 1;
-  int vfcount = 0;
+  int64_t frame_count = 0;
+  int64_t vfcount = 0;
+  int64_t afcount = 0;
   std::chrono::steady_clock::time_point video_live_until;
   std::chrono::steady_clock::time_point audio_live_until;
   auto start = std::chrono::steady_clock::now();
@@ -207,10 +209,11 @@ void *producer_handler(void *ptr) {
     }
 
     unlock_mutex(&producer_connected);
+    frame_count = 0;
     vfcount = 0;
+    afcount = 0;
     video_live_until = std::chrono::steady_clock::now();
     audio_live_until = std::chrono::steady_clock::now();
-    frame_count = 0;
     while (1) {
       AVPacket ppkt;
       AVCodecContext *pctx;
@@ -239,12 +242,16 @@ void *producer_handler(void *ptr) {
         goto producer_fail;
       }
       if (ppkt.stream_index == video_stream) {
-        // std::cerr << "p:" << ++vfcount << std::endl;
         AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
-        if (frame_count % 20)
-          video_live_until = std::chrono::steady_clock::now();  
         video_live_until += std::chrono::microseconds((1000000*fps.den)/fps.num);
+        
+        // if (frame_count++ % 20 == 0) {
+        //   av_frame_free(&pframe);
+        //   v_dts = ppkt.dts;
+        //   goto read_frame_end;
+        // }
         video_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, video_live_until));
+
         if (ppkt.dts && ppkt.dts != v_dts + ppkt.duration)
           std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " **** dropped video frame\n";
         v_dts = ppkt.dts;
@@ -252,9 +259,10 @@ void *producer_handler(void *ptr) {
         audio_live_until += std::chrono::microseconds((1000000 / (pframe->sample_rate/pframe->nb_samples)));
         audio_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, audio_live_until));
         // if (ppkt.dts && ppkt.dts != a_dts + ppkt.duration)
-        //   std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " **** dropped audio frame\n";
+        //   std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " != " << a_dts << " + " << ppkt.duration << " **** dropped audio frame\n";
         a_dts = ppkt.dts;
       }
+      // std::cerr << frame_count << ":" << ppkt.stream_index << std::endl;
 read_frame_end:
       av_packet_unref(&ppkt);
     }
@@ -276,11 +284,11 @@ static void *consumer_handler(void *ptr) {
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
-  int64_t last_frame = -1;
-  int64_t last_video_frame = -1;
-  int64_t last_audio_frame = -1;
-  int vfcount = 0;
+  int64_t expected_frame = -1;
   uint8_t consumer_id = consumers_connected++;
+  const size_t kMaxReceived = 10;
+  int64_t received[kMaxReceived];
+  size_t received_n = 0;
   
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
@@ -329,6 +337,10 @@ static void *consumer_handler(void *ptr) {
     }
   }
 
+  for (int i = 0; i < kMaxReceived; ++i) {
+    received[i] = -1;
+  }
+
   while (1) {
     Frame *videof = video_frames.PeekNext(consumer_id);
     Frame *audiof = audio_frames.PeekNext(consumer_id);
@@ -347,41 +359,47 @@ static void *consumer_handler(void *ptr) {
     }
 
     Frame *frame = (is_video ? videof : audiof)->Clone(consumer_id);
-    // std::cerr << frame->GetNumber() << std::endl;
-    // if (!frame || (is_video && last_video_frame == frame->GetNumber()) || (!is_video && last_audio_frame == frame->GetNumber())) {
-    //   if (frame)
-    //     frame->Free();
-    //   usleep(500); // TODO: wait for PopFront() signal
-    //   continue;
-    // }
 
-    // if (is_video) {
-    //   video_frames.TryPopFront();
-    // } else {
-    //   audio_frames.TryPopFront();
-    // }
+    if (expected_frame == -1)
+      expected_frame = frame->GetNumber();
 
-    // if (last_frame && frame->GetNumber() != last_frame + 1) {
-    //   std::cerr << "c:" << last_frame + 1 << " **** dropped " << (is_video ? "video frame\n" : "audio frame\n");
-    // }
+    // std::cerr << frame->GetNumber() << ":" << expected_frame << std::endl;
+
+    while (frame->GetNumber() != expected_frame) {
+      bool found = false;
+      for (int i = 0; i < kMaxReceived; ++i) {
+        if (received[i] == expected_frame) {
+          received[i] = -1;
+          found = true;
+          --received_n;
+          break;
+        }
+      }
+      if (found) {
+        ++expected_frame;
+        continue;
+      }
+
+      for (int i = 0; i < kMaxReceived; ++i) {
+        if (received[i] == -1) {
+          received[i] = frame->GetNumber();
+          ++received_n;
+          break;
+        }
+      }
+      if (received_n == kMaxReceived) {
+        std::cerr << "c(" << int{consumer_id} << "):" << expected_frame << " **** dropped\n";
+        ++expected_frame;
+        continue;
+      }
+      break;
+    }
+
+    if (frame->GetNumber() == expected_frame)
+      ++expected_frame;
+
     AVCodecContext *ctx = is_video ? video_codec_context : audio_codec_context;
     AVPacket cpkt;
-
-    // if (frame->GetStream())
-    //   goto write_frame_end;
-
-    // if (last_frame != frame->GetNumber() - 1) 
-    //   std::cerr << "dropped " << last_frame << std::endl;
-
-    last_frame = frame->GetNumber();
-    if (is_video)
-      last_video_frame = last_frame;
-    else
-      last_audio_frame = last_frame;
-
-    // std::cerr << last_frame << std::endl;
-    // if (is_video)
-    //   std::cerr << ++vfcount << std::endl;
 
     ret = avcodec_send_frame(ctx, frame->GetFrame());
     if (ret < 0) {
