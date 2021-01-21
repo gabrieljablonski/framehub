@@ -46,11 +46,11 @@ namespace framehub {
 #define MAX_ERRORS 10
 #define MAX_STREAMS 2
 AVFormatContext *producer_context;
-uint64_t dts_offsets[MAX_STREAMS] = { 0 };
-uint64_t last_dtss[MAX_STREAMS] = { 0 };
+int64_t dts_offsets[MAX_STREAMS] = { 0 };
+int64_t last_dtss[MAX_STREAMS] = { 0 };
 
-FrameQueue video_frames(3);
-FrameQueue audio_frames(5);
+FrameQueue video_frames(5);
+FrameQueue audio_frames(7);
 pthread_mutex_t producer_connected;
 uint8_t consumers_connected = 0;
 
@@ -157,7 +157,6 @@ int send_pkt_receive_frame(AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame) {
 }
 
 void *producer_handler(void *ptr) {
-  AVInputFormat *format = av_find_input_format("nut");
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
@@ -166,13 +165,14 @@ void *producer_handler(void *ptr) {
   int64_t frame_count = 0;
   int64_t vfcount = 0;
   int64_t afcount = 0;
+  int video_stream = -1;
+  int audio_stream = -1;
+
   std::chrono::steady_clock::time_point video_live_until;
   std::chrono::steady_clock::time_point audio_live_until;
   auto start = std::chrono::steady_clock::now();
 
-  int video_stream = -1;
-  int audio_stream = -1;
-
+  AVInputFormat *format = av_find_input_format("nut");
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
 
@@ -244,15 +244,10 @@ void *producer_handler(void *ptr) {
       if (ppkt.stream_index == video_stream) {
         AVRational fps = producer_context->streams[video_stream]->r_frame_rate;
         video_live_until += std::chrono::microseconds((1000000*fps.den)/fps.num);
-        
-        // if (frame_count++ % 20 == 0) {
-        //   av_frame_free(&pframe);
-        //   v_dts = ppkt.dts;
-        //   goto read_frame_end;
-        // }
+
         video_frames.PushBack(new Frame(pframe, ppkt.dts, ppkt.stream_index, frame_count++, video_live_until));
 
-        if (ppkt.dts && ppkt.dts != v_dts + ppkt.duration)
+        if (ppkt.dts && v_dts && ppkt.dts != v_dts + ppkt.duration)
           std::cerr << "p:" << frame_count - 1 << " " << ppkt.dts << " **** dropped video frame\n";
         v_dts = ppkt.dts;
       } else if (ppkt.stream_index == audio_stream) {
@@ -279,8 +274,6 @@ producer_fail:
 }
 
 static void *consumer_handler(void *ptr) {
-  AVFormatContext *consumer_context;
-  AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   int port = *(int *)ptr;
   char url[1024];
   int error_count = 0;
@@ -290,6 +283,8 @@ static void *consumer_handler(void *ptr) {
   int64_t received[kMaxReceived];
   size_t received_n = 0;
   
+  AVFormatContext *consumer_context;
+  AVOutputFormat* format = av_guess_format("nut", NULL, NULL);
   AVCodecContext *video_codec_context;
   AVCodecContext *audio_codec_context;
 
@@ -444,7 +439,7 @@ consumer_fail:
 
 void *dispose_frames(void *ptr) {
   while (1) {
-    usleep(1000);
+    usleep(14000);
     video_frames.TryPopFront();
     audio_frames.TryPopFront();
   }
