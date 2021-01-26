@@ -42,15 +42,14 @@ void unlock_mutex(pthread_mutex_t *mutex) {
 
 namespace framehub {
 
-#define FRAME_TTL_US 2*33367
-#define MAX_ERRORS 10
-#define MAX_STREAMS 2
+const int kMaxErrors = 10;
+const int kMaxStreams = 2;
 AVFormatContext *producer_context;
-int64_t dts_offsets[MAX_STREAMS] = { 0 };
-int64_t last_dtss[MAX_STREAMS] = { 0 };
+int64_t dts_offsets[kMaxStreams] = { 0 };
+int64_t last_dtss[kMaxStreams] = { 0 };
 
-FrameQueue video_frames(5);
-FrameQueue audio_frames(7);
+FrameQueue video_frames(30);
+FrameQueue audio_frames(42);
 pthread_mutex_t producer_connected;
 uint8_t consumers_connected = 0;
 
@@ -226,7 +225,7 @@ void *producer_handler(void *ptr) {
       if (ret < 0) {
         ++error_count;
         std::cerr << "failed to read frame " << ret << std::endl;
-        if (error_count > MAX_ERRORS)
+        if (error_count > kMaxErrors)
           goto producer_fail;
         goto read_frame_end;
       }
@@ -262,7 +261,7 @@ read_frame_end:
       av_packet_unref(&ppkt);
     }
 producer_fail:
-    memcpy(dts_offsets, last_dtss, MAX_STREAMS*sizeof(uint64_t));
+    memcpy(dts_offsets, last_dtss, kMaxStreams*sizeof(uint64_t));
     lock_mutex(&producer_connected);
     avformat_close_input(&producer_context);
     avformat_free_context(producer_context);
@@ -279,7 +278,7 @@ static void *consumer_handler(void *ptr) {
   int error_count = 0;
   int64_t expected_frame = -1;
   uint8_t consumer_id = consumers_connected++;
-  const size_t kMaxReceived = 10;
+  const size_t kMaxReceived = 50;
   int64_t received[kMaxReceived];
   size_t received_n = 0;
   
@@ -418,7 +417,7 @@ static void *consumer_handler(void *ptr) {
     if (ret < 0) {
       std::cerr << "`av_write_frame()` failed " << ret << std::endl;
       ++error_count;
-      if (error_count <= MAX_ERRORS)
+      if (error_count <= kMaxErrors)
         ret = 0;
       goto write_frame_end;
     }
